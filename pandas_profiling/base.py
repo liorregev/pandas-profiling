@@ -1,6 +1,18 @@
 from __future__ import division
 
+import multiprocessing
 import sys
+from functools import partial
+
+import numpy as np
+import pandas as pd
+import six
+from matplotlib import pyplot as plt
+from pandas.core import common as com
+from pkg_resources import resource_filename
+
+import pandas_profiling.formatters as formatters
+import pandas_profiling.templates as templates
 
 try:
     from StringIO import BytesIO
@@ -17,18 +29,6 @@ import base64
 import matplotlib
 matplotlib.use('Agg')
 
-import numpy as np
-import pandas as pd
-import pandas_profiling.formatters as formatters, pandas_profiling.templates as templates
-from matplotlib import pyplot as plt
-from pandas.core import common as com
-from pkg_resources import resource_filename
-import six
-# import copy_reg
-import types
-import multiprocessing
-from functools import partial
-
 
 def pretty_name(x):
     x *= 100
@@ -44,7 +44,8 @@ def describe_numeric_1d(series, **kwargs):
     stats['range'] = stats['max'] - stats['min']
 
     for x in np.array([0.05, 0.25, 0.5, 0.75, 0.95]):
-        stats[pretty_name(x)] = series.dropna().quantile(x) # The dropna() is a workaround for https://github.com/pydata/pandas/issues/13098
+        stats[pretty_name(x)] = series.dropna().quantile(x)  # The dropna() is a workaround for
+        # https://github.com/pydata/pandas/issues/13098
     stats['iqr'] = stats['75%'] - stats['25%']
     stats['kurtosis'] = series.kurt()
     stats['skewness'] = series.skew()
@@ -83,7 +84,7 @@ def _plot_histogram(series, bins=10, figsize=(6, 4), facecolor='#337ab7'):
         plot.set_ylabel('Frequency')
         try:
             plot.hist(series.values, facecolor=facecolor, bins=bins)
-        except TypeError: # matplotlib 1.4 can't plot dates so will show empty plot instead
+        except TypeError:  # matplotlib 1.4 can't plot dates so will show empty plot instead
             pass
     else:
         plot = series.plot(kind='hist', figsize=figsize,
@@ -146,11 +147,14 @@ def mini_histogram(series, **kwargs):
 
 
 def describe_date_1d(series):
-    stats = {'min': series.min(), 'max': series.max()}
+    stats = {
+        'min': series.min(),
+        'max': series.max(),
+        'type': 'DATE',
+        'histogram': histogram(series),
+        'mini_histogram': mini_histogram(series)
+    }
     stats['range'] = stats['max'] - stats['min']
-    stats['type'] = "DATE"
-    stats['histogram'] = histogram(series)
-    stats['mini_histogram'] = mini_histogram(series)
     return pd.Series(stats, name=series.name)
 
 
@@ -214,9 +218,9 @@ def describe_1d(data, **kwargs):
     elif com.is_numeric_dtype(data):
         result = result.append(describe_numeric_1d(data, **kwargs))
     elif com.is_datetime64_dtype(data):
-        result = result.append(describe_date_1d(data, **kwargs))
+        result = result.append(describe_date_1d(data))
     elif distinct_count == leng:
-        result = result.append(describe_unique_1d(data, **kwargs))
+        result = result.append(describe_unique_1d(data))
     else:
         result = result.append(describe_categorical_1d(data))
     return result
@@ -273,7 +277,8 @@ def describe(df, bins=10, correlation_overrides=None, pool_size=multiprocessing.
             continue
 
         for y, corr in corr_x.iteritems():
-            if x == y: break
+            if x == y:
+                break
 
             if corr > 0.9:
                 ldesc[x] = pd.Series(['CORR', y, corr], index=['type', 'correlation_var', 'correlation'], name=x)
@@ -289,12 +294,15 @@ def describe(df, bins=10, correlation_overrides=None, pool_size=multiprocessing.
     variable_stats.columns.names = df.columns.names
 
     # General statistics
-    table_stats = {'n': len(df), 'nvar': len(df.columns)}
-    table_stats['total_missing'] = variable_stats.loc['n_missing'].sum() / (table_stats['n'] * table_stats['nvar'])
-    table_stats['n_duplicates'] = sum(df.duplicated())
-
     memsize = df.memory_usage(index=True).sum()
-    table_stats['memsize'] = formatters.fmt_bytesize(memsize)
+    table_stats = {
+        'n': len(df),
+        'nvar': len(df.columns),
+        'n_duplicates': sum(df.duplicated()),
+        'memsize': formatters.fmt_bytesize(memsize),
+
+    }
+    table_stats['total_missing'] = variable_stats.loc['n_missing'].sum() / (table_stats['n'] * table_stats['nvar'])
     table_stats['recordsize'] = formatters.fmt_bytesize(memsize / table_stats['n'])
 
     table_stats.update({k: 0 for k in ("NUM", "DATE", "CONST", "CAT", "UNIQUE", "CORR")})
