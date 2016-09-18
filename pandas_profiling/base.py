@@ -257,6 +257,192 @@ def describe(df, bins=10, correlation_overrides=None, pool_size=multiprocessing.
 
     matplotlib.style.use(resource_filename(__name__, "pandas_profiling.mplstyle"))
 
+    def pretty_name(x):
+        x *= 100
+        if x == int(x):
+            return '%.0f%%' % x
+        else:
+            return '%.1f%%' % x
+
+    def describe_numeric_1d(series, base_stats):
+        stats = {'mean': series.mean(), 'std': series.std(), 'variance': series.var(), 'min': series.min(),
+                'max': series.max()}
+        stats['range'] = stats['max'] - stats['min']
+
+        for x in np.array([0.05, 0.25, 0.5, 0.75, 0.95]):
+            stats[pretty_name(x)] = series.dropna().quantile(x) # The dropna() is a workaround for https://github.com/pydata/pandas/issues/13098
+        stats['iqr'] = stats['75%'] - stats['25%']
+        stats['kurtosis'] = series.kurt()
+        stats['skewness'] = series.skew()
+        stats['sum'] = series.sum()
+        stats['mad'] = series.mad()
+        stats['cv'] = stats['std'] / stats['mean'] if stats['mean'] else np.NaN
+        stats['type'] = "NUM"
+        stats['n_zeros'] = (len(series) - np.count_nonzero(series))
+        stats['p_zeros'] = stats['n_zeros'] / len(series)
+        # Histograms
+        stats['histogram'] = histogram(series)
+        stats['mini_histogram'] = mini_histogram(series)
+        return pd.Series(stats, name=series.name)
+
+    def _plot_histogram(series, figsize=(6, 4), facecolor='#337ab7', bins=bins):
+        """Plot an histogram from the data and return the AxesSubplot object.
+
+        Parameters
+        ----------
+        series: Series, default None
+            The data to plot
+        figsize: a tuple (width, height) in inches, default (6,4)
+            The size of the figure.
+        facecolor: str
+            The color code.
+        bins: int, default
+            The number of equal-width bins in the given range.
+
+        Returns
+        -------
+        matplotlib.AxesSubplot, The plot.
+        """
+        if com.is_datetime64_dtype(series):
+            # TODO: These calls should be merged
+            fig = plt.figure(figsize=figsize)
+            plot = fig.add_subplot(111)
+            plot.set_ylabel('Frequency')
+            try:
+                plot.hist(series.values, facecolor=facecolor, bins=bins)
+            except TypeError: # matplotlib 1.4 can't plot dates so will show empty plot instead
+                pass
+        else:
+            plot = series.plot(kind='hist', figsize=figsize,
+                               facecolor=facecolor,
+                               bins=bins)  # TODO when running on server, send this off to a different thread
+        return plot
+
+    def histogram(series):
+        """Plot an histogram of the data.
+
+        Parameters
+        ----------
+        series: Series, default None
+            The data to plot.
+
+        Returns
+        -------
+        str, The resulting image encoded as a string.
+        """
+        imgdata = BytesIO()
+        plot = _plot_histogram(series)
+        plot.figure.subplots_adjust(left=0.15, right=0.95, top=0.9, bottom=0.1, wspace=0, hspace=0)
+        plot.figure.savefig(imgdata)
+        imgdata.seek(0)
+        result_string = 'data:image/png;base64,' + quote(base64.b64encode(imgdata.getvalue()))
+        # TODO Think about writing this to disk instead of caching them in strings
+        plt.close(plot.figure)
+        return result_string
+
+    def mini_histogram(series):
+        """Plot a small (mini) histogram of the data.
+
+        Parameters
+        ----------
+        series: Series, default None
+            The data to plot.
+
+        Returns
+        -------
+        str, The resulting image encoded as a string.
+        """
+        imgdata = BytesIO()
+        plot = _plot_histogram(series, figsize=(2, 0.75))
+        plot.axes.get_yaxis().set_visible(False)
+        plot.set_axis_bgcolor("w")
+        xticks = plot.xaxis.get_major_ticks()
+        for tick in xticks[1:-1]:
+            tick.set_visible(False)
+            tick.label.set_visible(False)
+        for tick in (xticks[0], xticks[-1]):
+            tick.label.set_fontsize(8)
+        plot.figure.subplots_adjust(left=0.15, right=0.85, top=1, bottom=0.35, wspace=0, hspace=0)
+        plot.figure.savefig(imgdata)
+        imgdata.seek(0)
+        result_string = 'data:image/png;base64,' + quote(base64.b64encode(imgdata.getvalue()))
+        plt.close(plot.figure)
+        return result_string
+
+    def describe_date_1d(series, base_stats):
+        stats = {'min': series.min(), 'max': series.max()}
+        stats['range'] = stats['max'] - stats['min']
+        stats['type'] = "DATE"
+        stats['histogram'] = histogram(series)
+        stats['mini_histogram'] = mini_histogram(series)
+        return pd.Series(stats, name=series.name)
+
+    def describe_categorical_1d(data):
+        # Only run if at least 1 non-missing value
+        objcounts = data.value_counts()
+        top, freq = objcounts.index[0], objcounts.iloc[0]
+        names = []
+        result = []
+
+        if data.dtype == object or com.is_categorical_dtype(data.dtype):
+            names += ['top', 'freq']
+            result += [top, freq]
+
+        return pd.Series(result, index=names, name=data.name)
+
+    def describe_constant_1d(data):
+        return pd.Series(['CONST'], index=['type'], name=data.name)
+
+    def describe_unique_1d(data):
+        return pd.Series(['UNIQUE'], index=['type'], name=data.name)
+
+    def describe_1d(data):
+        leng = len(data)  # number of observations in the Series
+        count = data.count()  # number of non-NaN observations in the Series
+
+        # Replace infinite values with NaNs to avoid issues with
+        # histograms later.
+        data.replace(to_replace=[np.inf, np.NINF, np.PINF], value=np.nan, inplace=True)
+
+        n_infinite = count - data.count()  # number of infinte observations in the Series
+        
+        distinct_count = data.nunique(dropna=False)  # number of unique elements in the Series
+        if count > distinct_count > 1:
+            mode = data.mode().iloc[0]
+        else:
+            mode = data[0]
+
+        results_data = {'count': count,
+                        'distinct_count': distinct_count,
+                        'p_missing': 1 - count / leng,
+                        'n_missing': leng - count,
+                        'p_infinite': n_infinite / leng,
+                        'n_infinite': n_infinite,
+                        'is_unique': distinct_count == leng,
+                        'mode': mode,
+                        'p_unique': distinct_count / count}
+        try:
+            # pandas 0.17 onwards
+            results_data['memorysize'] = data.memory_usage()
+        except:
+            results_data['memorysize'] = 0
+
+        result = pd.Series(results_data, name=data.name)
+
+        if distinct_count <= 1:
+            result = result.append(describe_constant_1d(data))
+        elif com.is_numeric_dtype(data):
+            result = result.append(describe_numeric_1d(data, result))
+        elif com.is_datetime64_dtype(data):
+            result = result.append(describe_date_1d(data, result))
+        elif distinct_count == leng:
+            result = result.append(describe_unique_1d(data))
+        else:
+            result = result.append(describe_categorical_1d(data))
+            result['type'] = 'CAT'
+
+        return result
+
     if not pd.Index(np.arange(0, len(df))).equals(df.index):
         # Treat index as any other column
         df = df.reset_index()
@@ -352,21 +538,7 @@ def to_html(sample, stats_object):
             else:
                 return unicode(value)
 
-    def freq_table(freqtable, n, table_template, row_template, max_number_of_items_in_table):
-
-        freq_rows_html = u''
-
-        freq_other = sum(freqtable[max_number_of_items_in_table:])
-        freq_missing = n - sum(freqtable)
-        max_freq = max(freqtable.values[0], freq_other, freq_missing)
-        try:
-            min_freq = freqtable.values[max_number_of_items_in_table]
-        except IndexError:
-            min_freq = 0
-
-        # TODO: Correctly sort missing and other
-
-        def format_row(freq, label, extra_class=''):
+    def _format_row(freq, label, max_freq, row_template, n, extra_class=''):
             width = int(freq / max_freq * 99) + 1
             if width > 20:
                 label_in_bar = freq
@@ -383,18 +555,51 @@ def to_html(sample, stats_object):
                                        label_in_bar=label_in_bar,
                                        label_after_bar=label_after_bar)
 
-        for label, freq in six.iteritems(freqtable[0:max_number_of_items_in_table]):
-            freq_rows_html += format_row(freq, label)
+    def freq_table(freqtable, n, table_template, row_template, max_number_to_print):
+
+        freq_rows_html = u''
+
+        if max_number_to_print > n:
+                max_number_to_print=n
+
+        if max_number_to_print < len(freqtable):
+            freq_other = sum(freqtable.iloc[max_number_to_print:])
+            min_freq = freqtable.values[max_number_to_print]
+        else:
+            freq_other = 0
+            min_freq = 0
+
+        freq_missing = n - sum(freqtable)
+        max_freq = max(freqtable.values[0], freq_other, freq_missing)
+
+        # TODO: Correctly sort missing and other
+
+        for label, freq in six.iteritems(freqtable.iloc[0:max_number_to_print]):
+            freq_rows_html += _format_row(freq, label, max_freq, row_template, n)
 
         if freq_other > min_freq:
-            freq_rows_html += format_row(freq_other,
-                                         "Other values (%s)" % (freqtable.count() - max_number_of_items_in_table),
+            freq_rows_html += _format_row(freq_other,
+                                         "Other values (%s)" % (freqtable.count() - max_number_to_print), max_freq, row_template, n,
                                          extra_class='other')
 
         if freq_missing > min_freq:
-            freq_rows_html += format_row(freq_missing, "(Missing)", extra_class='missing')
+            freq_rows_html += _format_row(freq_missing, "(Missing)", max_freq, row_template, n, extra_class='missing')
 
         return table_template.render(rows=freq_rows_html, varid=hash(idx))
+
+    def extreme_obs_table(freqtable, table_template, row_template, number_to_print, n, ascending = True):
+        if ascending:
+            obs_to_print = freqtable.sort_index().iloc[:number_to_print]
+        else:
+            obs_to_print = freqtable.sort_index().iloc[-number_to_print:]
+
+        freq_rows_html = ''
+        max_freq = max(obs_to_print.values)
+
+        for label, freq in six.iteritems(obs_to_print):
+            freq_rows_html += _format_row(freq, label, max_freq, row_template, n)
+
+        return table_template.render(rows=freq_rows_html)
 
     # Variables
     rows_html = u""
@@ -416,8 +621,7 @@ def to_html(sample, stats_object):
         if row['type'] == 'CAT':
             formatted_values['minifreqtable'] = freq_table(stats_object['freq'][idx], n_obs,
                                                            templates.template('mini_freq_table'), templates.template('mini_freq_table_row'), 3)
-            formatted_values['freqtable'] = freq_table(stats_object['freq'][idx], n_obs,
-                                                       templates.template('freq_table'), templates.template('freq_table_row'), 20)
+
             if row['distinct_count'] > 50:
                 messages.append(templates.messages['HIGH_CARDINALITY'].format(formatted_values, varname = formatters.fmt_varname(idx)))
                 row_classes['distinct_count'] = "alert"
@@ -430,19 +634,16 @@ def to_html(sample, stats_object):
             formatted_values['firstn'] = pd.DataFrame(obs[0:3], columns=["First 3 values"]).to_html(classes="example_values", index=False)
             formatted_values['lastn'] = pd.DataFrame(obs[-3:], columns=["Last 3 values"]).to_html(classes="example_values", index=False)
 
-            if n_obs > 40:
-                formatted_values['firstn_expanded'] = pd.DataFrame(obs[0:20], index=range(1, 21)).to_html(classes="sample table table-hover", header=False)
-                formatted_values['lastn_expanded'] = pd.DataFrame(obs[-20:], index=range(n_obs - 20 + 1, n_obs+1)).to_html(classes="sample table table-hover", header=False)
-            else:
-                formatted_values['firstn_expanded'] = pd.DataFrame(obs, index=range(1, n_obs+1)).to_html(classes="sample table table-hover", header=False)
-                formatted_values['lastn_expanded'] = ''
-
-        rows_html += templates.row_templates_dict[row['type']].render(values=formatted_values, row_classes=row_classes)
-
         if row['type'] in {'CORR', 'CONST'}:
             formatted_values['varname'] = formatters.fmt_varname(idx)
             messages.append(templates.messages[row['type']].format(formatted_values))
+        else:
+            formatted_values['freqtable'] = freq_table(stats_object['freq'][idx], n_obs,
+                                                       templates.template('freq_table'), templates.template('freq_table_row'), 10)
+            formatted_values['firstn_expanded'] = extreme_obs_table(stats_object['freq'][idx], templates.template('freq_table'), templates.template('freq_table_row'), 5, n_obs, ascending = True)
+            formatted_values['lastn_expanded'] = extreme_obs_table(stats_object['freq'][idx], templates.template('freq_table'), templates.template('freq_table_row'), 5, n_obs, ascending = False)
 
+        rows_html += templates.row_templates_dict[row['type']].render(values=formatted_values, row_classes=row_classes)
 
     # Overview
     formatted_values = {k: fmt(v, k) for k, v in six.iteritems(stats_object['table'])}
